@@ -7,75 +7,117 @@ struct queue_node {
 
 // https://manpages.debian.org/testing/linux-manual-4.11/
 // https://docs.kernel.org/core-api/list.html
-int traverse(struct task_struct *start, struct k22info *buf, int limit) {
+
+int traverse(struct k22info *buf, int limit) {
 	int count = 0;
 
+	struct k22info *kbuf = kmalloc_array(limit, sizeof(struct k22info), GFP_KERNEL);
+	if(!kbuf){
+		return -ENOMEM;
+	}
+
 	struct queue_node *start_node = kmalloc(sizeof(struct queue_node), GFP_KERNEL);
-	start_node->task = start;
+	if(!start_node){
+		kfree(kbuf);
+		return -ENOMEM;
+	}
+	start_node->task = &init_task;
 
 	struct list_head queue;
 	INIT_LIST_HEAD(&queue);
 
 	list_add(&start_node->node, &queue);
 
+	read_lock(&tasklist_lock);
+
 	// Stack is not empty
 	while(!list_empty(&queue)) {
 		// Get first entry of stack
-		struct queue_node *parent_node = list_first_entry(&queue, struct queue_node, node);
-		struct task_struct *parent = parent_node->task;
+		struct queue_node *current_node = list_first_entry(&queue, struct queue_node, node);
+		struct task_struct *curr = current_node->task;
 
 		// Pop from stack & free
-		list_del(&parent_node->node);
-		kfree(parent_node);
+		list_del(&current_node->node);
+		kfree(current_node);
 
+		// Check if read items exceed limit given by user
 		if(count < limit) {
 			struct k22info n;
-			// Copy name
-			if(TASK_COMM_LEN >= 64) {
-				memcpy(&n.comm, &parent->comm, 64);
-				n.comm[63] = '\0'; // Ensure string ends;
-			}else {
-				memcpy(&n.comm, &parent->comm, TASK_COMM_LEN);
-				n.comm[TASK_COMM_LEN] = '\0'; // Ensure string ends;
+			
+			get_task_comm(n.comm, curr);
+			n.pid = curr->pid;
+			n.parent_pid = task_pid_vnr(curr->real_parent);
+			n.nvcsw = curr->nvcsw;
+			n.nivcsw = curr->nivcsw;
+			n.start_time = curr->start_time;
+
+			struct task_struct *first_child = NULL;
+			list_for_each_entry(first_child, &curr->children, sibling) {
+				// Ensure child is a process and current is not last
+				if(first_child == NULL || task_pid_vnr(first_child) == curr->pid || thread_group_leader(first_child)) {
+					break;
+				}
 			}
-			n.pid = parent->pid;
-			n.parent_pid = task_pid_vnr(parent->real_parent);
-			struct task_struct *first_sibling = list_entry(&parent->sibling, struct task_struct, sibling);
-			n.next_sibling_pid = first_sibling->pid;
-			struct task_struct *first_child = list_entry(&parent->children, struct task_struct, children);
-			n.first_child_pid = first_child->pid;
+			n.first_child_pid = first_child == NULL ? 0 : task_pid_vnr(first_child);
+
+			struct task_struct *next_sibling = NULL;
+			list_for_each_entry(next_sibling, &curr->sibling, sibling) {
+				// Ensure sibling is a process and current is not last
+				if(next_sibling == NULL || task_pid_vnr(next_sibling) == curr->pid || thread_group_leader(next_sibling)) {
+					break;
+				}
+			}
+			n.next_sibling_pid = next_sibling == NULL ? 0 : task_pid_vnr(next_sibling);
 	
-			// Copy struct to user space on buffer
-			copy_to_user(buf + count, &n, sizeof(struct k22info));
+			// Copy struct to temp buffer
+			kbuf[count] = n;
 		}
 		count++;
 		
 		// For each child of current process
 		struct task_struct *child;
-		list_for_each_entry(child, &parent->children, sibling) {
-			// Push child processes to stack
-			struct queue_node *child_node = kmalloc(sizeof(struct queue_node), GFP_KERNEL);
-			child_node->task = child;
-			list_add(&child_node->node, &queue);
-
-			pr_info("[K22] Adding %d\n", child->pid);
+		list_for_each_entry_reverse(child, &curr->children, sibling) {
+			if(thread_group_leader(child)) {
+				// Child is process, push to stack
+				struct queue_node *child_node = kmalloc(sizeof(struct queue_node), GFP_KERNEL);
+				if(!child_node){
+					kfree(kbuf);
+					return -ENOMEM;
+				}
+				child_node->task = child;
+				list_add(&child_node->node, &queue);
+			}
 		}
 	}
 
-	return count;
+	read_unlock(&tasklist_lock);
+	
+	unsigned long err = copy_to_user(buf, kbuf, (size_t) limit * sizeof(struct k22info));
+	kfree(kbuf);
+
+	return err ? -EFAULT : count;
 }
 
 int k22tree(struct k22info *buf, int *ne) {
+
+	if(!buf || !ne){
+		return -EINVAL;
+	}
+	
+	if(!access_ok(ne, sizeof(int))){
+		return -EFAULT;
+	}
+
 	int size;
-	copy_from_user(&size, ne, sizeof(int));
+	if(copy_from_user(&size, ne, sizeof(int))) {
+		return -EFAULT;
+	}
+	
+	if(size < 1){
+		return -EINVAL;
+	}
 
-	struct pid* pid_struct = find_get_pid(1);
-	struct task_struct *parent = pid_task(pid_struct, PIDTYPE_PID);
-
-	int count = traverse(parent, buf, size);
-
-	put_pid(pid_struct);
-	return count;
+	return traverse(buf, size);
 }
 
 SYSCALL_DEFINE2(k22_tree, struct k22info __user *, buf, int __user *, ne)
