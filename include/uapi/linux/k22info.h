@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 
-#include <linux/kernel.h>
-#include <linux/syscalls.h>
-#include <linux/uaccess.h>
-#include <linux/slab.h>
-#include <linux/types.h>
+#ifdef __KERNEL__
 #include <linux/pid.h>
+#else
+#include <sys/types.h>
+#endif
 
 struct k22info {
 	char comm[64];                  /* name of the executable */

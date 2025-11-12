@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/k22info.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/uaccess.h>
+#include <linux/slab.h>
+#include <linux/types.h>
 
 struct queue_node {
 	struct task_struct *task;
@@ -10,7 +15,7 @@ struct queue_node {
 // https://manpages.debian.org/testing/linux-manual-4.11/
 // https://docs.kernel.org/core-api/list.html
 
-int traverse(struct k22info *buf, int limit)
+static int traverse(struct k22info *buf, int limit)
 {
 	int count = 0;
 
@@ -111,7 +116,7 @@ int traverse(struct k22info *buf, int limit)
 	return err ? -EFAULT : count;
 }
 
-int k22tree(struct k22info *buf, int *ne)
+static int k22tree(struct k22info *buf, int *ne)
 {
 	if (!buf || !ne)
 		return -EINVAL;
